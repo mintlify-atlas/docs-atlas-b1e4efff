@@ -1,0 +1,177 @@
+---
+title: "Handoff Mechanism"
+description: "How the supervisor delegates work to sub-agents using tool-based handoffs and LangGraph Commands."
+---
+
+Handoffs are the mechanism by which the supervisor transfers control to a sub-agent. They are implemented as ordinary LangGraph tools — the supervisor LLM calls a handoff tool, and the tool returns a `Command` that redirects graph execution to the target agent node.
+
+## Automatically created handoff tools
+
+When you call `create_supervisor`, the library inspects the list of agents and creates one handoff tool per sub-agent. By default each tool is named `transfer_to_<agent_name>`, where `<agent_name>` is normalized to lowercase with spaces replaced by underscores.
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],  # named "math_expert" and "research_expert"
+    model=model,
+)
+# Handoff tools created automatically:
+#   transfer_to_math_expert
+#   transfer_to_research_expert
+```
+
+You can change the prefix with `handoff_tool_prefix`:
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    handoff_tool_prefix="delegate_to_",
+)
+# Tools become: delegate_to_math_expert, delegate_to_research_expert
+```
+
+Or pass fully custom handoff tools instead:
+
+```python
+from langgraph_supervisor import create_handoff_tool
+
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    tools=[
+        create_handoff_tool(agent_name="math_expert", name="assign_to_math_expert"),
+        create_handoff_tool(agent_name="research_expert", name="assign_to_research_expert"),
+    ],
+    model=model,
+)
+```
+
+<Note>
+  When you supply custom handoff tools, you must provide one for **every** sub-agent. The library raises a `ValueError` if any agent is missing a handoff tool.
+</Note>
+
+## What happens during a handoff
+
+The lifecycle of a single handoff involves four steps:
+
+<Steps>
+  <Step title="Supervisor emits a ToolCall">
+    The supervisor LLM decides to delegate and emits an `AIMessage` with a `tool_calls` entry referencing the handoff tool, for example `transfer_to_math_expert`.
+  </Step>
+  <Step title="ToolNode runs the handoff tool">
+    The inner `ToolNode` inside the supervisor's react-agent loop executes the handoff tool function. The function receives the current graph `state` via `InjectedState` and the `tool_call_id` via `InjectedToolCallId`.
+  </Step>
+  <Step title="Tool returns a Command">
+    The tool constructs a `ToolMessage` confirming the transfer, appends it (and optionally the `AIMessage`) to the message list, then returns a `Command` that targets the agent node in the parent graph:
+
+    ```python
+    # Simplified from handoff.py
+    return Command(
+        goto=agent_name,          # e.g. "math_expert"
+        graph=Command.PARENT,     # target the outer supervisor graph
+        update={**state, "messages": handoff_messages},
+    )
+    ```
+  </Step>
+  <Step title="Agent node executes">
+    LangGraph routes execution to the named agent node. After the sub-agent completes, the hard-coded edge returns control to the supervisor.
+  </Step>
+</Steps>
+
+## The `METADATA_KEY_HANDOFF_DESTINATION` metadata key
+
+Every handoff tool has a `metadata` dict with the key `"__handoff_destination"` set to the target agent name:
+
+```python
+from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
+
+# The library reads this metadata to discover which agents a tool targets
+handoff_tool.metadata = {METADATA_KEY_HANDOFF_DESTINATION: agent_name}
+```
+
+The supervisor uses this metadata at build time to:
+
+1. Identify which tools are handoff tools vs. regular tools.
+2. Verify that every sub-agent has a corresponding handoff tool.
+3. Register the correct conditional edges in the `StateGraph` so LangGraph knows which agent nodes are reachable from the supervisor.
+
+When writing a custom handoff tool, you **must** set this metadata key — otherwise the library will not recognize it as a handoff tool and will not wire up the corresponding graph edge.
+
+## Parallel handoffs
+
+When `parallel_tool_calls=True` (default is `False`), the supervisor LLM can emit multiple handoff tool calls in a single `AIMessage`. The library handles this case by using `Send` instead of a direct `goto`:
+
+```python
+# Simplified from handoff.py — parallel path
+if len(last_ai_message.tool_calls) > 1:
+    return Command(
+        graph=Command.PARENT,
+        goto=[Send(agent_name, {**state, "messages": handoff_messages})],
+    )
+```
+
+Each `Send` dispatches an independent copy of the state to its target agent. LangGraph's `ToolNode` collects all `Send` commands produced by parallel tool executions and merges them into a single `Command`, triggering all target agents concurrently.
+
+<Warning>
+  Parallel handoffs are only supported by OpenAI and Anthropic models via the `parallel_tool_calls` parameter. For other providers, control parallel behavior through system prompt instructions.
+</Warning>
+
+When a parallel handoff occurs, the `AIMessage` sent to each sub-agent is filtered to contain only the tool call relevant to that agent — other tool calls are stripped out to keep the message history valid:
+
+```python
+# _remove_non_handoff_tool_calls in handoff.py
+# Each agent only sees the tool call addressed to it
+last_ai_message = AIMessage(
+    content=content,
+    tool_calls=[
+        tool_call
+        for tool_call in last_ai_message.tool_calls
+        if tool_call["id"] == handoff_tool_call_id  # only this agent's call
+    ],
+    ...
+)
+```
+
+## Handoff messages (`add_handoff_messages`)
+
+By default, when a handoff occurs, a pair of messages is appended to the message history:
+
+1. An `AIMessage` from the supervisor containing the handoff tool call.
+2. A `ToolMessage` confirming the transfer (e.g. `"Successfully transferred to math_expert"`).
+
+This pair makes the handoff visible in the conversation history and lets the sub-agent understand the context of how it was invoked.
+
+You can disable these messages to produce a more compact history:
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    add_handoff_messages=False,  # omit the AIMessage + ToolMessage pair
+)
+```
+
+<Tip>
+  Disabling handoff messages reduces token consumption but may make it harder for the supervisor to follow the conversation thread across multiple delegations.
+</Tip>
+
+## Handoff-back messages (`add_handoff_back_messages`)
+
+When a sub-agent finishes and control returns to the supervisor, the library can optionally append another pair of messages indicating that the handoff has completed:
+
+1. An `AIMessage` from the sub-agent: `"Transferring back to supervisor"`.
+2. A `ToolMessage`: `"Successfully transferred back to supervisor"`.
+
+Both messages carry `response_metadata["__is_handoff_back"] = True` so they can be identified programmatically.
+
+By default, `add_handoff_back_messages` mirrors the value of `add_handoff_messages`. You can set it independently:
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    add_handoff_messages=True,       # show outgoing handoff
+    add_handoff_back_messages=False, # but omit the return confirmation
+)
+```
+
+These messages are generated by `create_handoff_back_messages` in `handoff.py` and appended by the `_make_call_agent` wrapper after the sub-agent returns.

@@ -1,0 +1,96 @@
+---
+title: "create_handoff_tool"
+description: "Create a LangChain tool that transfers control from the supervisor to a named sub-agent."
+---
+
+## Overview
+
+`create_handoff_tool` produces a `BaseTool` that the supervisor LLM can call to route work to a specific sub-agent. `create_supervisor` auto-generates these tools for every agent in `agents`, but you can create custom ones when you need non-default names or descriptions.
+
+```python
+from langgraph_supervisor import create_supervisor
+from langgraph_supervisor.handoff import create_handoff_tool
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+
+math_agent = create_react_agent(
+    model="openai:gpt-4o",
+    tools=[],
+    name="math_expert",
+)
+
+# Custom handoff tool with a tailored description
+math_handoff = create_handoff_tool(
+    agent_name="math_expert",
+    description="Route to the math expert for all arithmetic and algebra questions.",
+)
+
+workflow = create_supervisor(
+    [math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    tools=[math_handoff],  # supply custom tool; auto-generation is skipped
+)
+```
+
+<Note>
+  When you pass any custom handoff tools via `tools`, you must provide one for **every** sub-agent listed in `agents`. Missing tools will raise a `ValueError`.
+</Note>
+
+## Signature
+
+```python
+def create_handoff_tool(
+    *,
+    agent_name: str,
+    name: str | None = None,
+    description: str | None = None,
+    add_handoff_messages: bool = True,
+) -> BaseTool
+```
+
+## Parameters
+
+<ParamField path="agent_name" type="str" required>
+  The name of the agent node to hand off control to. Must exactly match the name given to the agent when it was created (e.g., `create_react_agent(..., name="math_expert")`).
+
+  Agent names should be simple, clear, and unique — preferably `snake_case` — because the name is embedded in the auto-generated tool name.
+</ParamField>
+
+<ParamField path="name" type="str | None">
+  Custom name for the handoff tool. Defaults to `transfer_to_<agent_name>` (e.g., `transfer_to_math_expert`).
+</ParamField>
+
+<ParamField path="description" type="str | None">
+  Custom description shown to the LLM to help it decide when to call this tool. Defaults to `"Ask agent '<agent_name>' for help"`.
+</ParamField>
+
+<ParamField path="add_handoff_messages" type="bool">
+  Whether to append an `(AIMessage, ToolMessage)` pair to the message history when the handoff fires. Defaults to `True`.
+
+  Set to `False` to suppress the handoff messages and pass only the existing history to the sub-agent.
+</ParamField>
+
+## Returns
+
+<ResponseField name="BaseTool" type="BaseTool">
+  A LangChain `BaseTool` configured to transfer control to the specified agent. When invoked, it returns a LangGraph `Command` that routes the graph to the target agent node.
+</ResponseField>
+
+## Metadata
+
+The returned tool carries a metadata key that `create_supervisor` uses to detect custom handoff tools and validate coverage:
+
+```python
+METADATA_KEY_HANDOFF_DESTINATION = "__handoff_destination"
+```
+
+You can inspect it directly:
+
+```python
+from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION, create_handoff_tool
+
+tool = create_handoff_tool(agent_name="math_expert")
+print(tool.metadata[METADATA_KEY_HANDOFF_DESTINATION])  # "math_expert"
+```
+
+`create_supervisor` reads this key to determine which agents already have a handoff tool and which ones still need one auto-generated.

@@ -1,0 +1,143 @@
+---
+title: "Supervisor Architecture"
+description: "How the supervisor pattern structures multi-agent workflows using a central orchestrator and a LangGraph StateGraph."
+---
+
+The supervisor pattern is the organizing principle behind `langgraph-supervisor`. A single **supervisor agent** sits at the center of the workflow and delegates tasks to a set of specialized **sub-agents**. The supervisor never does domain work directly — it only decides who should do it.
+
+## What is a supervisor agent?
+
+A supervisor agent is an LLM-powered node whose only job is orchestration. Given the current conversation state, it chooses one of its available handoff tools to route control to the right sub-agent. When that agent finishes, control returns to the supervisor, which then decides whether to delegate again or respond to the user.
+
+This separation of concerns keeps each agent focused:
+
+- The **supervisor** holds the routing logic and the high-level understanding of the task.
+- Each **sub-agent** holds only the tools and knowledge needed for its specialty.
+
+## StateGraph structure
+
+`create_supervisor` builds and returns an **uncompiled** `StateGraph`. You call `.compile()` on it before invoking.
+
+```python
+from langgraph_supervisor import create_supervisor
+
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    prompt="You are a team supervisor...",
+)
+
+# workflow is a StateGraph — compile before use
+app = workflow.compile()
+```
+
+Returning the raw `StateGraph` is intentional: it lets you add memory, a checkpointer, a store, or any other LangGraph customization before compilation.
+
+Internally the graph contains three kinds of nodes:
+
+| Node | Role |
+|---|---|
+| **Supervisor node** | An inner `create_react_agent` graph that calls the LLM and executes handoff tools |
+| **Agent nodes** | One node per sub-agent that invokes the sub-agent and post-processes its output |
+| **Tool node** | Embedded inside the supervisor's inner react-agent loop; executes the handoff tools |
+
+## Graph structure
+
+```
+                    ┌─────────────────────────────────────┐
+                    │          Supervisor Graph            │
+                    │                                      │
+  User ──► START ──►│──► supervisor ◄──────────────────┐  │──► END ──► User
+                    │         │                        │  │
+                    │   (handoff tool)          (agent done)│
+                    │         │                        │  │
+                    │         ▼                        │  │
+                    │   ┌──────────┐   ┌────────────┐  │  │
+                    │   │math_agent│   │research_   │  │  │
+                    │   │  node    │   │agent node  │──┘  │
+                    │   └──────────┘   └────────────┘     │
+                    └─────────────────────────────────────┘
+```
+
+The fixed edges in the graph are:
+
+- `START → supervisor` — every invocation begins at the supervisor.
+- `agent_node → supervisor` — after any sub-agent finishes, control always returns to the supervisor.
+- `supervisor → END` — when the supervisor decides the task is complete, it emits a final response and the graph ends.
+
+The **conditional routing** inside the supervisor decides at runtime which agent node (or `END`) to go to next, based on which handoff tool the LLM calls.
+
+## Execution flow
+
+<Steps>
+  <Step title="User sends a message">
+    The graph starts at `START` and the message is placed into `state["messages"]`.
+  </Step>
+  <Step title="Supervisor evaluates the request">
+    The supervisor LLM reads the message history and decides which sub-agent to call. It emits an `AIMessage` containing a tool call for the appropriate handoff tool (e.g. `transfer_to_math_expert`).
+  </Step>
+  <Step title="Handoff tool executes">
+    The tool node inside the supervisor's react-agent loop runs the handoff tool. The tool returns a `Command` that jumps execution to the target agent node in the parent graph.
+  </Step>
+  <Step title="Sub-agent runs">
+    The sub-agent receives the current message history and works on the task using its own tools. When it finishes, its output messages are merged back into the shared state.
+  </Step>
+  <Step title="Control returns to supervisor">
+    The hard-coded edge from every agent node back to the supervisor fires. The supervisor sees the updated message history including the sub-agent's response.
+  </Step>
+  <Step title="Supervisor responds or delegates again">
+    The supervisor either calls another handoff tool (delegating to a second agent) or produces a final `AIMessage` response without any tool calls, which causes the graph to route to `END`.
+  </Step>
+</Steps>
+
+## The `supervisor_name` parameter
+
+Every node in a LangGraph graph must have a unique name. The supervisor node name defaults to `"supervisor"` but can be changed with the `supervisor_name` parameter:
+
+```python
+workflow = create_supervisor(
+    agents=[research_agent, math_agent],
+    model=model,
+    supervisor_name="research_supervisor",  # custom name
+)
+```
+
+Naming matters in two situations:
+
+1. **Multi-level hierarchies** — when you nest supervisors inside a larger graph, each supervisor node must have a distinct name so LangGraph can route between them correctly.
+2. **Handoff-back messages** — when `add_handoff_back_messages=True` (the default), the library generates messages that reference the supervisor by name (e.g. `transfer_back_to_research_supervisor`). The name must match the actual node name.
+
+```python
+# Multi-level example — each supervisor gets a unique name
+research_team = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    supervisor_name="research_supervisor",
+).compile(name="research_team")
+
+writing_team = create_supervisor(
+    [writing_agent, publishing_agent],
+    model=model,
+    supervisor_name="writing_supervisor",
+).compile(name="writing_team")
+
+top_level = create_supervisor(
+    [research_team, writing_team],
+    model=model,
+    supervisor_name="top_level_supervisor",
+).compile()
+```
+
+## Why this pattern is useful
+
+<CardGroup cols={3}>
+  <Card title="Clear delegation" icon="arrow-right-arrow-left">
+    The supervisor is the single decision-maker. Sub-agents never call each other directly, so the routing logic is easy to trace and debug.
+  </Card>
+  <Card title="Message isolation" icon="shield">
+    Each sub-agent receives only the messages relevant to its task. The `output_mode` setting controls how much of the sub-agent's internal history is surfaced back to the supervisor.
+  </Card>
+  <Card title="Composability" icon="puzzle-piece">
+    Because `create_supervisor` returns a `StateGraph`, the compiled result is itself a `Pregel` object with a `.name`. A compiled supervisor can be passed as a sub-agent to another `create_supervisor` call, enabling arbitrarily deep hierarchies.
+  </Card>
+</CardGroup>

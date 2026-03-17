@@ -1,0 +1,82 @@
+---
+title: "Memory"
+description: "Add short-term and long-term memory to your supervisor multi-agent system."
+---
+
+LangGraph Supervisor integrates directly with LangGraph's memory primitives. Because `create_supervisor()` returns a `StateGraph` (not yet compiled), you attach memory at compile time — the same way you would with any LangGraph graph.
+
+## Memory types
+
+| Type | Primitive | Scope |
+|------|-----------|-------|
+| Short-term | `checkpointer` | Per conversation thread — persists messages across turns |
+| Long-term | `store` | Cross-thread — shared key/value store accessible to all runs |
+
+## Adding memory
+
+<Steps>
+  <Step title="Import the memory primitives">
+    For development and testing, use the in-memory implementations. For production, swap these for a durable backend.
+
+    ```python
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    checkpointer = InMemorySaver()
+    store = InMemoryStore()
+    ```
+  </Step>
+
+  <Step title="Build the supervisor workflow">
+    Create the supervisor as usual with `create_supervisor()`. Memory is **not** passed here.
+
+    ```python
+    from langgraph_supervisor import create_supervisor
+
+    workflow = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        prompt="You are a team supervisor managing a research expert and a math expert.",
+    )
+    ```
+  </Step>
+
+  <Step title="Compile with memory attached">
+    Pass the checkpointer and/or store to `.compile()`.
+
+    ```python
+    app = workflow.compile(
+        checkpointer=checkpointer,
+        store=store
+    )
+    ```
+  </Step>
+
+  <Step title="Invoke with a thread ID">
+    Short-term memory is scoped to a `thread_id`. Pass it in the `configurable` dict so the checkpointer can isolate conversations.
+
+    ```python
+    config = {"configurable": {"thread_id": "user-123-session-1"}}
+
+    # First turn
+    result = app.invoke(
+        {"messages": [{"role": "user", "content": "What is 2 + 2?"}]},
+        config=config,
+    )
+
+    # Second turn — the checkpointer restores prior messages automatically
+    result = app.invoke(
+        {"messages": [{"role": "user", "content": "Now multiply that by 3."}]},
+        config=config,
+    )
+    ```
+  </Step>
+</Steps>
+
+## Why memory is added at compile time
+
+`create_supervisor()` returns a `StateGraph` — an uncompiled graph builder. Memory backends are attached when the graph is compiled into a `CompiledGraph`. This is consistent with how all LangGraph graphs work and means you can reuse the same `workflow` object to create multiple compiled apps with different memory configurations (e.g., one for testing, one for production).
+
+<Tip>
+  `InMemorySaver` and `InMemoryStore` are useful for development but do not persist across process restarts. For production deployments, see the [LangGraph persistence documentation](https://langchain-ai.github.io/langgraph/how-tos/persistence/) for durable checkpointer options such as PostgreSQL and Redis.
+</Tip>

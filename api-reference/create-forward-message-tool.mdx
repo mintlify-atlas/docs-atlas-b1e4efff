@@ -1,0 +1,91 @@
+---
+title: "create_forward_message_tool"
+description: "Create a tool that forwards the latest message from a sub-agent directly to the user without rewriting it."
+---
+
+## Overview
+
+`create_forward_message_tool` produces a `BaseTool` named `forward_message` that the supervisor can call instead of summarizing or paraphrasing a sub-agent's response. This preserves information fidelity and can reduce token usage by avoiding an extra LLM rewrite.
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph_supervisor import create_supervisor
+from langgraph_supervisor.handoff import create_forward_message_tool
+
+research_agent = create_react_agent(
+    model="openai:gpt-4o",
+    tools=[],
+    name="research_expert",
+)
+
+forward_tool = create_forward_message_tool(supervisor_name="supervisor")
+
+workflow = create_supervisor(
+    [research_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    tools=[forward_tool],
+)
+
+app = workflow.compile()
+```
+
+## Signature
+
+```python
+def create_forward_message_tool(
+    supervisor_name: str = "supervisor",
+) -> BaseTool
+```
+
+## Parameters
+
+<ParamField path="supervisor_name" type="str">
+  The name of the supervisor node. Defaults to `"supervisor"`. This value is used to namespace the forwarded message — the re-emitted `AIMessage` will have `name` set to this value.
+</ParamField>
+
+## Returns
+
+<ResponseField name="BaseTool" type="BaseTool">
+  A LangChain `BaseTool` named `forward_message`.
+</ResponseField>
+
+## How it works
+
+When the supervisor calls `forward_message`, the tool:
+
+1. Receives a `from_agent` string argument (the name of the agent whose message should be forwarded).
+2. Scans `state["messages"]` in reverse to find the most recent `AIMessage` whose `name` matches `from_agent` (case-insensitive), skipping any handoff-back messages.
+3. Re-emits the message content as a new `AIMessage` attributed to the supervisor node, then returns a `Command` that routes the graph to `__end__`.
+4. If no matching message is found, returns an error string listing the agent names that were found.
+
+```python
+# Simplified equivalent of what the tool does internally
+def forward_message(from_agent: str, state: dict) -> str | Command:
+    target_message = next(
+        (
+            m
+            for m in reversed(state["messages"])
+            if isinstance(m, AIMessage)
+            and (m.name or "").lower() == from_agent.lower()
+            and not m.response_metadata.get("__is_handoff_back")
+        ),
+        None,
+    )
+    if not target_message:
+        found_names = {m.name for m in state["messages"] if isinstance(m, AIMessage) and m.name}
+        return f"Could not find message from source agent {from_agent}. Found names: {found_names}"
+
+    updates = [
+        AIMessage(
+            content=target_message.content,
+            name=supervisor_name,
+            id=str(uuid.uuid4()),
+        )
+    ]
+    return Command(graph=Command.PARENT, goto="__end__", update={**state, "messages": updates})
+```
+
+<Tip>
+  Use `forward_message` when the sub-agent's response should reach the user verbatim — for example, when the agent returns a structured report, code snippet, or precise data that must not be rephrased.
+</Tip>

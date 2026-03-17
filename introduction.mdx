@@ -1,0 +1,106 @@
+---
+title: "Introduction"
+description: "Build hierarchical multi-agent systems with LangGraph Supervisor — a Python library for orchestrating specialized agents through a central supervisor."
+---
+
+LangGraph Supervisor is a Python library for creating **hierarchical multi-agent systems** built on top of [LangGraph](https://github.com/langchain-ai/langgraph). A supervisor agent coordinates multiple specialized sub-agents, controlling all communication flow and task delegation based on the current context and requirements.
+
+<Note>
+  We now recommend using the **supervisor pattern directly via tools** rather than this library for most new use cases. The tool-calling approach gives you more control over context engineering. If you find this library solves a problem not easily addressed with the manual supervisor pattern, it remains fully supported and compatible with LangChain 1.0.
+</Note>
+
+## What is a supervisor agent?
+
+In a hierarchical multi-agent system, a **supervisor** is the central coordinator that:
+
+- Receives user requests and decides which specialized agent to call
+- Routes tasks to agents best suited to handle them
+- Manages the flow of information between agents
+- Returns the final response to the user
+
+Specialized **sub-agents** are purpose-built workers (e.g., a math expert, a research expert) that receive tasks from the supervisor and return results.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Supervisor orchestration" icon="sitemap">
+    Create a supervisor agent to manage multiple specialized sub-agents with automatic tool-based handoff routing.
+  </Card>
+  <Card title="Tool-based handoffs" icon="arrow-right-arrow-left">
+    Agents communicate through handoff tools — the supervisor calls a tool to delegate to the right agent.
+  </Card>
+  <Card title="Message history control" icon="message">
+    Choose between `full_history` and `last_message` output modes to control how much context each agent sees.
+  </Card>
+  <Card title="Multi-level hierarchies" icon="diagram-project">
+    Compose supervisors into nested hierarchies where supervisors manage other supervisors.
+  </Card>
+  <Card title="Memory support" icon="database">
+    Add short-term and long-term memory via LangGraph checkpointers and stores — just pass them to `.compile()`.
+  </Card>
+  <Card title="Streaming & human-in-the-loop" icon="circle-play">
+    Inherits full LangGraph support for streaming, interrupts, and human-in-the-loop workflows.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+- Python >= 3.10
+- `langgraph >= 1.0.2`
+- `langchain-core >= 1.0.0`
+
+## Installation
+
+```bash
+pip install langgraph-supervisor
+```
+
+## Quick example
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph_supervisor import create_supervisor
+from langgraph.prebuilt import create_react_agent
+
+model = ChatOpenAI(model="gpt-4o")
+
+math_agent = create_react_agent(
+    model=model,
+    tools=[add, multiply],
+    name="math_expert",
+    prompt="You are a math expert. Always use one tool at a time."
+)
+
+research_agent = create_react_agent(
+    model=model,
+    tools=[web_search],
+    name="research_expert",
+    prompt="You are a world class researcher with access to web search."
+)
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    prompt="You are a team supervisor. Use math_expert for calculations, research_expert for facts."
+)
+
+app = workflow.compile()
+result = app.invoke({"messages": [{"role": "user", "content": "What is 2 + 2?"}]})
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first supervisor system in minutes
+  </Card>
+  <Card title="Supervisor architecture" icon="building" href="/concepts/supervisor-architecture">
+    Understand how the supervisor pattern works
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/create-supervisor">
+    Full reference for `create_supervisor` and related functions
+  </Card>
+  <Card title="Custom handoff tools" icon="wrench" href="/guides/custom-handoff-tools">
+    Customize how agents communicate
+  </Card>
+</CardGroup>

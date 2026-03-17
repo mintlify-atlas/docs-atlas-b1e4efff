@@ -1,80 +1,240 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build a working multi-agent supervisor in minutes using LangGraph Supervisor."
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through creating a supervisor agent that coordinates two specialized sub-agents — one for math and one for research — to answer a question that requires both skills.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  LangGraph Supervisor requires Python 3.10 or higher.
 </Note>
+
+<Steps>
+  <Step title="Install dependencies">
+    Install `langgraph-supervisor` along with `langchain-openai` as the LLM provider, then export your OpenAI API key.
+
+    <CodeGroup>
+      ```bash pip
+      pip install langgraph-supervisor langchain-openai
+      ```
+
+      ```bash uv
+      uv add langgraph-supervisor langchain-openai
+      ```
+    </CodeGroup>
+
+    ```bash
+    export OPENAI_API_KEY=<your_api_key>
+    ```
+
+    <Tip>
+      Any LangChain-compatible chat model works as a drop-in replacement for OpenAI. Swap `ChatOpenAI` for your preferred provider.
+    </Tip>
+  </Step>
+
+  <Step title="Create two specialized sub-agents">
+    Each sub-agent is a standard ReAct agent built with `create_react_agent` from `langgraph.prebuilt`. Give every agent a unique `name` — the supervisor uses this name when deciding which agent to call.
+
+    ```python
+    from langchain_openai import ChatOpenAI
+    from langgraph.prebuilt import create_react_agent
+
+    model = ChatOpenAI(model="gpt-4o")
+
+    # --- Tools ---
+
+    def add(a: float, b: float) -> float:
+        """Add two numbers."""
+        return a + b
+
+    def multiply(a: float, b: float) -> float:
+        """Multiply two numbers."""
+        return a * b
+
+    def web_search(query: str) -> str:
+        """Search the web for information."""
+        return (
+            "Here are the headcounts for each of the FAANG companies in 2024:\n"
+            "1. **Facebook (Meta)**: 67,317 employees.\n"
+            "2. **Apple**: 164,000 employees.\n"
+            "3. **Amazon**: 1,551,000 employees.\n"
+            "4. **Netflix**: 14,000 employees.\n"
+            "5. **Google (Alphabet)**: 181,269 employees."
+        )
+
+    # --- Agents ---
+
+    math_agent = create_react_agent(
+        model=model,
+        tools=[add, multiply],
+        name="math_expert",
+        prompt="You are a math expert. Always use one tool at a time."
+    )
+
+    research_agent = create_react_agent(
+        model=model,
+        tools=[web_search],
+        name="research_expert",
+        prompt="You are a world class researcher with access to web search. Do not do any math."
+    )
+    ```
+
+    <Note>
+      Agent names must be unique within a supervisor. `create_supervisor` will raise a `ValueError` if two agents share the same name.
+    </Note>
+  </Step>
+
+  <Step title="Create the supervisor workflow">
+    Pass both agents to `create_supervisor` along with the model and an optional system prompt. The supervisor automatically generates `transfer_to_<agent_name>` handoff tools for each sub-agent.
+
+    ```python
+    from langgraph_supervisor import create_supervisor
+
+    workflow = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        prompt=(
+            "You are a team supervisor managing a research expert and a math expert. "
+            "For current events, use research_agent. "
+            "For math problems, use math_agent."
+        )
+    )
+    ```
+
+    `create_supervisor` returns a `StateGraph` — an uncompiled LangGraph workflow that you can further configure before running.
+  </Step>
+
+  <Step title="Compile and invoke the workflow">
+    Call `.compile()` to get a runnable app, then invoke it with a user message.
+
+    ```python
+    app = workflow.compile()
+
+    result = app.invoke({
+        "messages": [
+            {
+                "role": "user",
+                "content": "what's the combined headcount of the FAANG companies in 2024?"
+            }
+        ]
+    })
+    ```
+
+    The supervisor routes to `research_agent` to look up the headcounts, then to `math_agent` to sum them up, and finally returns the combined answer.
+  </Step>
+
+  <Step title="Inspect the output">
+    The result is a dict with a `messages` key containing the full conversation history. Use `.pretty_print()` on each message for readable output.
+
+    ```python
+    for m in result["messages"]:
+        m.pretty_print()
+    ```
+
+    You'll see the complete message trace — including the supervisor's handoff calls, each agent's tool invocations, and the final answer:
+
+    ```
+    ================================ Human Message =================================
+    what's the combined headcount of the FAANG companies in 2024?
+
+    ================================== Ai Message ==================================
+    Name: supervisor
+    Tool Calls:
+      transfer_to_research_expert (...)
+
+    ================================= Tool Message =================================
+    Name: transfer_to_research_expert
+    Successfully transferred to research_expert
+
+    ... (research_agent retrieves headcounts via web_search) ...
+
+    ================================== Ai Message ==================================
+    Name: supervisor
+    Tool Calls:
+      transfer_to_math_expert (...)
+
+    ... (math_agent adds all five numbers) ...
+
+    ================================== Ai Message ==================================
+    Name: supervisor
+    The combined headcount of the FAANG companies in 2024 is approximately 1,977,586 employees.
+    ```
+
+    <Tip>
+      To return only the supervisor's final response instead of the full trace, set `output_mode="last_message"` in `create_supervisor`. Use `"full_history"` to include every intermediate message from all agents.
+    </Tip>
+  </Step>
+</Steps>
+
+## Complete example
+
+Here is the full working script from the steps above:
+
+```python
+from langchain_openai import ChatOpenAI
+
+from langgraph_supervisor import create_supervisor
+from langgraph.prebuilt import create_react_agent
+
+model = ChatOpenAI(model="gpt-4o")
+
+# Create specialized agents
+
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+def multiply(a: float, b: float) -> float:
+    """Multiply two numbers."""
+    return a * b
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return (
+        "Here are the headcounts for each of the FAANG companies in 2024:\n"
+        "1. **Facebook (Meta)**: 67,317 employees.\n"
+        "2. **Apple**: 164,000 employees.\n"
+        "3. **Amazon**: 1,551,000 employees.\n"
+        "4. **Netflix**: 14,000 employees.\n"
+        "5. **Google (Alphabet)**: 181,269 employees."
+    )
+
+math_agent = create_react_agent(
+    model=model,
+    tools=[add, multiply],
+    name="math_expert",
+    prompt="You are a math expert. Always use one tool at a time."
+)
+
+research_agent = create_react_agent(
+    model=model,
+    tools=[web_search],
+    name="research_expert",
+    prompt="You are a world class researcher with access to web search. Do not do any math."
+)
+
+# Create supervisor workflow
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    prompt=(
+        "You are a team supervisor managing a research expert and a math expert. "
+        "For current events, use research_agent. "
+        "For math problems, use math_agent."
+    )
+)
+
+# Compile and run
+app = workflow.compile()
+result = app.invoke({
+    "messages": [
+        {
+            "role": "user",
+            "content": "what's the combined headcount of the FAANG companies in 2024?"
+        }
+    ]
+})
+
+for m in result["messages"]:
+    m.pretty_print()
+```

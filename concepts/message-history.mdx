@@ -1,0 +1,160 @@
+---
+title: "Message History"
+description: "How to control which messages sub-agents contribute to the shared conversation state using output_mode."
+---
+
+Every sub-agent runs its own internal conversation — it may call tools multiple times, receive tool results, and reason across several turns before producing a final answer. The `output_mode` parameter controls how many of those internal messages are surfaced back into the supervisor's shared message state.
+
+## The `OutputMode` type
+
+```python
+OutputMode = Literal["full_history", "last_message"]
+```
+
+This type is defined in `supervisor.py` and accepted by `create_supervisor`'s `output_mode` parameter (default: `"last_message"`).
+
+## `full_history` — keep everything
+
+With `output_mode="full_history"`, **all** messages produced during a sub-agent's execution are appended to the shared state when the agent finishes.
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    output_mode="full_history",
+)
+```
+
+### What the message list looks like
+
+```
+Before handoff:
+  [HumanMessage("What is 12 * 4?")]
+  [AIMessage(supervisor): tool_call transfer_to_math_expert]
+  [ToolMessage: "Successfully transferred to math_expert"]
+
+After math_agent runs (full_history):
+  [HumanMessage("What is 12 * 4?")]
+  [AIMessage(supervisor): tool_call transfer_to_math_expert]
+  [ToolMessage: "Successfully transferred to math_expert"]
+  ──────────────── math_agent messages ────────────────
+  [AIMessage(math_expert): tool_call multiply(12, 4)]
+  [ToolMessage: "48"]
+  [AIMessage(math_expert): "12 multiplied by 4 is 48."]
+  ──────────────────────────────────────────────────────
+  [AIMessage(math_expert): "Transferring back to supervisor"]  ← if add_handoff_back_messages=True
+  [ToolMessage: "Successfully transferred back to supervisor"]
+```
+
+The supervisor sees the complete reasoning trail: every tool call, every intermediate result, and the final answer.
+
+## `last_message` — keep only the final response
+
+With `output_mode="last_message"` (the default), only the sub-agent's final message is kept. If that last message is a `ToolMessage`, the preceding `AIMessage` is also retained (to preserve a valid message pair).
+
+```python
+workflow = create_supervisor(
+    agents=[math_agent, research_agent],
+    model=model,
+    output_mode="last_message",  # default
+)
+```
+
+### What the message list looks like
+
+```
+Before handoff:
+  [HumanMessage("What is 12 * 4?")]
+  [AIMessage(supervisor): tool_call transfer_to_math_expert]
+  [ToolMessage: "Successfully transferred to math_expert"]
+
+After math_agent runs (last_message):
+  [HumanMessage("What is 12 * 4?")]
+  [AIMessage(supervisor): tool_call transfer_to_math_expert]
+  [ToolMessage: "Successfully transferred to math_expert"]
+  ──────────── only the final message ────────────
+  [AIMessage(math_expert): "12 multiplied by 4 is 48."]
+  ─────────────────────────────────────────────────
+  [AIMessage(math_expert): "Transferring back to supervisor"]  ← if add_handoff_back_messages=True
+  [ToolMessage: "Successfully transferred back to supervisor"]
+```
+
+The supervisor receives a concise summary without the internal tool-calling steps.
+
+## Comparing the two modes
+
+<Tabs>
+  <Tab title="full_history">
+    ```python
+    workflow = create_supervisor(
+        agents=[math_agent, research_agent],
+        model=model,
+        output_mode="full_history",
+    )
+    app = workflow.compile()
+    ```
+
+    **Pros**
+    - The supervisor sees the full reasoning trail, making it easier to catch errors or verify intermediate steps.
+    - Useful for debugging and tracing exactly what each sub-agent did.
+    - Lets the supervisor build follow-up prompts that reference specific intermediate results.
+
+    **Cons**
+    - Larger message lists consume more tokens on every subsequent supervisor call.
+    - Irrelevant tool calls from one agent may confuse the supervisor when managing many agents.
+  </Tab>
+  <Tab title="last_message">
+    ```python
+    workflow = create_supervisor(
+        agents=[math_agent, research_agent],
+        model=model,
+        output_mode="last_message",  # default
+    )
+    app = workflow.compile()
+    ```
+
+    **Pros**
+    - Token-efficient: the shared state stays small regardless of how many steps a sub-agent takes internally.
+    - Cleaner conversation history — the supervisor only sees conclusions, not internal deliberation.
+    - Better for production systems with cost or latency constraints.
+
+    **Cons**
+    - The supervisor cannot inspect intermediate reasoning steps.
+    - If the sub-agent's final message is ambiguous, the supervisor has less context to work with.
+  </Tab>
+</Tabs>
+
+## When to use each mode
+
+<Note>
+  Start with `"last_message"` (the default). Switch to `"full_history"` only when the supervisor needs to inspect the sub-agent's reasoning, or when you are debugging unexpected behavior.
+</Note>
+
+| Situation | Recommended mode |
+|---|---|
+| Production system with many agents | `last_message` |
+| Supervisor needs to verify intermediate steps | `full_history` |
+| Debugging agent behavior | `full_history` |
+| Cost or latency is a priority | `last_message` |
+| Sub-agent uses many tool calls internally | `last_message` |
+| Multi-hop reasoning where context matters | `full_history` |
+
+## How the filtering works in code
+
+The `_process_output` function in `supervisor.py` applies the mode after each sub-agent call:
+
+```python
+def _process_output(output: dict) -> dict:
+    messages = output["messages"]
+    if output_mode == "full_history":
+        pass  # keep all messages as-is
+    elif output_mode == "last_message":
+        if isinstance(messages[-1], ToolMessage):
+            messages = messages[-2:]  # keep the AIMessage + ToolMessage pair
+        else:
+            messages = messages[-1:]  # keep only the final AIMessage
+    ...
+    return {**output, "messages": messages}
+```
+
+The filtered messages are then merged into the supervisor graph's state via the `add_messages` reducer, which appends them to the existing conversation.

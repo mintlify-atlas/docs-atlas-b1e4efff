@@ -1,0 +1,108 @@
+---
+title: "AgentNameMode"
+description: "Controls how sub-agent names are exposed to the supervisor language model in multi-agent message histories."
+---
+
+## Definition
+
+```python
+AgentNameMode = Literal["inline"]
+```
+
+Passed as the `include_agent_name` parameter of [`create_supervisor`](/api-reference/create-supervisor).
+
+## Values
+
+### `None` (default)
+
+Relies on the LLM provider's native support for the `name` attribute on `AIMessage`. The message content is left unchanged; only the `name` field is set.
+
+<Note>
+  Native `name` attribute support is currently only guaranteed by OpenAI models. For other providers, use `"inline"` to ensure the agent name is visible to the LLM.
+</Note>
+
+### `"inline"`
+
+Wraps the AI message content with XML-style tags before passing it to the supervisor LLM:
+
+```
+<name>agent_name</name><content>original message content</content>
+```
+
+The tags are automatically stripped from the model's own output so the response stored in state is clean.
+
+**Example transformation:**
+
+```python
+# Before (stored in state)
+AIMessage(content="Here are the FAANG headcounts: ...", name="research_expert")
+
+# After transformation (sent to LLM)
+AIMessage(
+    content="<name>research_expert</name><content>Here are the FAANG headcounts: ...</content>",
+    name="research_expert",
+)
+```
+
+## Helper functions
+
+These functions from `langgraph_supervisor.agent_name` handle the XML wrapping and unwrapping:
+
+### `add_inline_agent_name`
+
+Adds `<name>` and `<content>` XML tags to an `AIMessage`'s content field.
+
+```python
+from langgraph_supervisor.agent_name import add_inline_agent_name
+from langchain_core.messages import AIMessage
+
+# String content
+add_inline_agent_name(AIMessage(content="Hello", name="assistant"))
+# AIMessage(content="<name>assistant</name><content>Hello</content>", name="assistant")
+
+# Content-block content (multi-modal)
+add_inline_agent_name(AIMessage(content=[{"type": "text", "text": "Hello"}], name="assistant"))
+# AIMessage(content=[{"type": "text", "text": "<name>assistant</name><content>Hello</content>"}], name="assistant")
+```
+
+Messages that are not `AIMessage` instances, or that have no `name` set, are returned unchanged.
+
+### `remove_inline_agent_name`
+
+Strips `<name>` and `<content>` XML tags from an `AIMessage`'s content field, recovering the original text.
+
+```python
+from langgraph_supervisor.agent_name import remove_inline_agent_name
+from langchain_core.messages import AIMessage
+
+# String content
+remove_inline_agent_name(
+    AIMessage(content="<name>assistant</name><content>Hello</content>", name="assistant")
+)
+# AIMessage(content="Hello", name="assistant")
+
+# Content-block content (multi-modal)
+remove_inline_agent_name(
+    AIMessage(
+        content=[{"type": "text", "text": "<name>assistant</name><content>Hello</content>"}],
+        name="assistant",
+    )
+)
+# AIMessage(content=[{"type": "text", "text": "Hello"}], name="assistant")
+```
+
+Messages that contain no matching XML tags are returned unchanged.
+
+## Usage
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph_supervisor import create_supervisor
+
+# Use inline mode for non-OpenAI models or when native name support is unreliable
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    include_agent_name="inline",
+)
+```

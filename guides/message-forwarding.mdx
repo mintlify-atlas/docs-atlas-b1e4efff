@@ -1,0 +1,70 @@
+---
+title: "Message Forwarding"
+description: "Forward a worker agent's response directly to output, bypassing supervisor summarization."
+---
+
+By default the supervisor reads a worker agent's response and decides how to reply to the user — sometimes paraphrasing or condensing the original message. The **message forwarding tool** lets the supervisor skip that step and pass the worker's last `AIMessage` directly to the graph output.
+
+## When to use it
+
+- You want to **preserve response fidelity** — the worker's exact words matter
+- You want to **save tokens** by not having the supervisor restate the answer
+- The worker's response is self-contained and requires no further processing
+
+## Setup
+
+<Steps>
+  <Step title="Import and create the tool">
+    The argument to `create_forward_message_tool` is the name that will be assigned to the forwarded `AIMessage`. Typically this is the supervisor's name.
+
+    ```python
+    from langgraph_supervisor.handoff import create_forward_message_tool
+
+    forwarding_tool = create_forward_message_tool("supervisor")
+    ```
+  </Step>
+
+  <Step title="Pass the tool to the supervisor">
+    Include `forwarding_tool` in the `tools` list. You can combine it with other custom or default handoff tools.
+
+    ```python
+    from langgraph_supervisor import create_supervisor
+
+    workflow = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        # Pass the forwarding tool along with any other custom or default handoff tools
+        tools=[forwarding_tool]
+    )
+    ```
+  </Step>
+
+  <Step title="Compile and run">
+    Compile and invoke as normal. The supervisor now has a `forward_message` tool it can call when appropriate.
+
+    ```python
+    app = workflow.compile()
+    result = app.invoke({
+        "messages": [
+            {"role": "user", "content": "What are the FAANG headcounts for 2024?"}
+        ]
+    })
+    ```
+  </Step>
+</Steps>
+
+## How the tool works
+
+The `forward_message` tool accepts a single argument: `from_agent` — the name of the worker whose last response should be forwarded.
+
+When called, it:
+
+1. Scans the message history in reverse for the most recent `AIMessage` whose `name` matches `from_agent` (case-insensitive)
+2. Creates a new `AIMessage` with the same `content`, attributed to the supervisor name you passed to `create_forward_message_tool`
+3. Returns a `Command` that writes that message to the parent graph's state and ends the run
+
+If no matching message is found, the tool returns an error string listing the agent names it did find, so the supervisor can handle the failure gracefully.
+
+<Note>
+  When passing `tools=[forwarding_tool]` without explicit handoff tools, the library will auto-generate `transfer_to_<agent_name>` tools for each sub-agent and merge them with `forwarding_tool`. You do not need to manually re-specify the handoff tools.
+</Note>

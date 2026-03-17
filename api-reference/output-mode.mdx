@@ -1,0 +1,73 @@
+---
+title: "OutputMode"
+description: "Controls how a sub-agent's message history is merged back into the supervisor graph after each handoff."
+---
+
+## Definition
+
+```python
+OutputMode = Literal["full_history", "last_message"]
+```
+
+Passed as the `output_mode` parameter of [`create_supervisor`](/api-reference/create-supervisor).
+
+## Values
+
+### `"last_message"` (default)
+
+Adds only the tail of the sub-agent's message history to the supervisor graph:
+
+- If the last message is **not** a `ToolMessage`, only that single message is appended.
+- If the last message **is** a `ToolMessage`, the last **two** messages are appended (the preceding `AIMessage` and the `ToolMessage`), preserving the valid tool-call/tool-result pair.
+
+This keeps the supervisor's message history concise and avoids exposing internal tool-calling loops to the supervisor LLM.
+
+### `"full_history"`
+
+Appends the **entire** message history produced by the sub-agent to the supervisor graph. Use this when the supervisor needs to reason about the full chain of tool calls and intermediate results.
+
+## Behavior in source code
+
+The selection logic lives in `_process_output` inside `supervisor.py`:
+
+```python
+def _process_output(output: dict) -> dict:
+    messages = output["messages"]
+    if output_mode == "full_history":
+        pass  # keep all messages as-is
+    elif output_mode == "last_message":
+        if isinstance(messages[-1], ToolMessage):
+            messages = messages[-2:]  # keep last AIMessage + ToolMessage pair
+        else:
+            messages = messages[-1:]  # keep only the last message
+
+    if add_handoff_back_messages:
+        messages.extend(create_handoff_back_messages(agent.name, supervisor_name))
+
+    return {**output, "messages": messages}
+```
+
+## Example
+
+```python
+from langgraph_supervisor import create_supervisor
+from langchain_openai import ChatOpenAI
+
+# Only the final answer from each agent is visible to the supervisor
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    output_mode="last_message",  # default
+)
+
+# The supervisor sees the complete internal reasoning of each agent
+workflow_full = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    output_mode="full_history",
+)
+```
+
+<Tip>
+  Start with `"last_message"` (the default). Switch to `"full_history"` only if the supervisor needs to trace the agent's internal tool calls — for example, to validate intermediate steps or to build chains of reasoning.
+</Tip>

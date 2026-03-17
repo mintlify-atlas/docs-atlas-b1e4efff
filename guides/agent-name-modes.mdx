@@ -1,0 +1,87 @@
+---
+title: "Agent Name Modes"
+description: "Configure how agent names are surfaced to the supervisor LLM for non-OpenAI model compatibility."
+---
+
+When multiple agents contribute messages to a shared history, the supervisor LLM needs to know which agent produced which message. LangGraph stores this in the `name` attribute on `AIMessage` objects. However, not all LLM providers expose this attribute in the prompt they receive.
+
+## The compatibility problem
+
+- **OpenAI** natively supports the `name` attribute on messages — the model sees the agent name without any extra work
+- **Anthropic, Google, and others** do not — if you rely on the default behavior with these providers, the supervisor may not be able to distinguish between agent responses
+
+## The `include_agent_name` parameter
+
+`create_supervisor()` accepts an `include_agent_name` parameter that controls how agent names are injected into the message history before it reaches the LLM.
+
+| Value | Behavior |
+|-------|----------|
+| `None` (default) | Relies on the LLM provider's native support for the `name` attribute. Works correctly with OpenAI. |
+| `"inline"` | Wraps each `AIMessage`'s content in XML tags containing the agent name. Compatible with all providers. |
+
+## Using inline mode
+
+Set `include_agent_name="inline"` when using Anthropic, Google, or any provider that does not natively support message name attributes:
+
+```python
+from langgraph_supervisor import create_supervisor
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    include_agent_name="inline"
+)
+```
+
+With `"inline"`, every `AIMessage` from a named agent is transformed before being passed to the supervisor LLM:
+
+```
+# Original message content
+"Here are the FAANG headcounts..."
+
+# Transformed content sent to the LLM
+"<name>research_expert</name><content>Here are the FAANG headcounts...</content>"
+```
+
+The name tags are stripped from the LLM's output before it is stored back in state, so downstream consumers see the clean original content.
+
+## Helper functions
+
+The transformation is handled by two public functions in `langgraph_supervisor.agent_name`:
+
+### `add_inline_agent_name`
+
+Wraps an `AIMessage`'s content with `<name>` and `<content>` XML tags:
+
+```python
+from langgraph_supervisor.agent_name import add_inline_agent_name
+from langchain_core.messages import AIMessage
+
+message = AIMessage(content="Hello", name="assistant")
+formatted = add_inline_agent_name(message)
+# formatted.content == "<name>assistant</name><content>Hello</content>"
+```
+
+For messages with content blocks (e.g., Anthropic-style structured content), only the first text block is wrapped; non-text blocks are preserved.
+
+### `remove_inline_agent_name`
+
+Parses and removes the XML tags, restoring the original content:
+
+```python
+from langgraph_supervisor.agent_name import remove_inline_agent_name
+from langchain_core.messages import AIMessage
+
+message = AIMessage(
+    content="<name>assistant</name><content>Hello</content>",
+    name="assistant"
+)
+cleaned = remove_inline_agent_name(message)
+# cleaned.content == "Hello"
+```
+
+If no XML tags are found the message is returned unchanged, making the function safe to call unconditionally.
+
+<Note>
+  The `with_agent_name` function in `langgraph_supervisor.agent_name` wraps your model in a pipeline that applies `add_inline_agent_name` to inputs and `remove_inline_agent_name` to outputs automatically. You do not need to call the helper functions directly when using `include_agent_name="inline"` — the supervisor handles it for you.
+</Note>

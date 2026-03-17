@@ -1,0 +1,84 @@
+---
+title: "Multi-Level Hierarchies"
+description: "Organize agents into teams, each managed by its own supervisor, coordinated by a top-level supervisor."
+---
+
+For complex tasks that span distinct domains, a single flat supervisor can become a bottleneck. Multi-level hierarchies solve this by grouping related agents into **teams**, each with a dedicated supervisor, and then placing those teams under a top-level supervisor that coordinates across them.
+
+## When to use hierarchies
+
+Consider a hierarchical structure when:
+
+- Your agents naturally fall into separate functional domains (e.g., research vs. writing)
+- You want to limit the context any single supervisor must reason over
+- Different teams have independent tool sets or operational prompts
+
+## How it works
+
+Each team is built with `create_supervisor()` and compiled into a named graph. Those compiled graphs become the agents that the top-level supervisor manages. The top-level supervisor sees only the team graphs — not the individual agents inside them.
+
+<Steps>
+  <Step title="Build each sub-team">
+    Create a supervisor for each team and compile it with a unique `name`. The `supervisor_name` parameter identifies the internal supervisor node so it can be distinguished across levels.
+
+    ```python
+    from langgraph_supervisor import create_supervisor
+
+    research_team = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        supervisor_name="research_supervisor"
+    ).compile(name="research_team")
+
+    writing_team = create_supervisor(
+        [writing_agent, publishing_agent],
+        model=model,
+        supervisor_name="writing_supervisor"
+    ).compile(name="writing_team")
+    ```
+  </Step>
+
+  <Step title="Build the top-level supervisor">
+    Pass the compiled team graphs as the agents list. Each team graph is treated as a single agent from the top-level supervisor's perspective.
+
+    ```python
+    top_level_supervisor = create_supervisor(
+        [research_team, writing_team],
+        model=model,
+        supervisor_name="top_level_supervisor"
+    ).compile(name="top_level_supervisor")
+    ```
+  </Step>
+
+  <Step title="Run the hierarchy">
+    Invoke the top-level supervisor just like any other compiled graph.
+
+    ```python
+    result = top_level_supervisor.invoke({
+        "messages": [
+            {"role": "user", "content": "Research the FAANG headcounts and write a summary report."}
+        ]
+    })
+    ```
+  </Step>
+</Steps>
+
+## The `.compile(name=...)` call
+
+Calling `.compile(name="research_team")` does two things:
+
+1. Produces a compiled `Pregel` object that can be invoked
+2. Sets the `.name` attribute that LangGraph uses to register the team as a node and to generate the handoff tool (e.g., `transfer_to_research_team`)
+
+Without a name, `create_supervisor()` will raise a `ValueError` when you try to add the graph as an agent.
+
+## The `supervisor_name` parameter
+
+When nesting supervisors, `supervisor_name` sets the name of the internal supervisor node inside each team graph. This matters for two reasons:
+
+- **Handoff-back messages** reference this name when control returns from a sub-agent to the supervisor
+- **Distinguishing supervisors** in traces and logs — each level gets a clear identifier
+
+<Note>
+  Agent names (and compiled graph names) must be **unique** across the entire hierarchy. Passing two agents with the same name to any `create_supervisor()` call raises a `ValueError`.
+</Note>

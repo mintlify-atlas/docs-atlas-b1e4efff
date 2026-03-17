@@ -1,0 +1,211 @@
+---
+title: "create_supervisor"
+description: "Create a multi-agent supervisor that manages a set of sub-agents using a language model."
+---
+
+## Overview
+
+`create_supervisor` builds a supervisor node that routes work to specialized sub-agents. It returns an **uncompiled** `StateGraph` — call `.compile()` before invoking.
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph_supervisor import create_supervisor
+
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return "Here are the headcounts for each of the FAANG companies in 2024..."
+
+math_agent = create_react_agent(
+    model="openai:gpt-4o",
+    tools=[add],
+    name="math_expert",
+)
+
+research_agent = create_react_agent(
+    model="openai:gpt-4o",
+    tools=[web_search],
+    name="research_expert",
+)
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+)
+
+app = workflow.compile()
+result = app.invoke({
+    "messages": [
+        {
+            "role": "user",
+            "content": "What's the combined headcount of the FAANG companies in 2024?"
+        }
+    ]
+})
+```
+
+<Note>
+  `create_supervisor` returns an uncompiled `StateGraph`. You must call `.compile()` on the result before invoking it.
+</Note>
+
+## Signature
+
+```python
+def create_supervisor(
+    agents: list[Pregel],
+    *,
+    model: LanguageModelLike,
+    tools: list[BaseTool | Callable] | ToolNode | None = None,
+    prompt: Prompt | None = None,
+    response_format: StructuredResponseSchema | tuple[str, StructuredResponseSchema] | None = None,
+    pre_model_hook: RunnableLike | None = None,
+    post_model_hook: RunnableLike | None = None,
+    parallel_tool_calls: bool = False,
+    state_schema: StateSchemaType | None = None,
+    context_schema: Type[Any] | None = None,
+    output_mode: OutputMode = "last_message",
+    add_handoff_messages: bool = True,
+    handoff_tool_prefix: str | None = None,
+    add_handoff_back_messages: bool | None = None,
+    supervisor_name: str = "supervisor",
+    include_agent_name: AgentNameMode | None = None,
+) -> StateGraph
+```
+
+## Parameters
+
+<ParamField path="agents" type="list[Pregel]" required>
+  List of agents to manage. Each agent can be a LangGraph `CompiledStateGraph`, a functional API workflow, or any other `Pregel` object.
+
+  Every agent **must** have a unique, non-default name set via `create_react_agent(..., name=agent_name)` or `graph.compile(name=name)`.
+</ParamField>
+
+<ParamField path="model" type="LanguageModelLike" required>
+  Language model to use for the supervisor. The model is automatically bound to all handoff tools and any additional tools you provide.
+</ParamField>
+
+<ParamField path="tools" type="list[BaseTool | Callable] | ToolNode | None">
+  Additional tools available to the supervisor beyond the auto-generated handoff tools.
+
+  If you supply custom handoff tools (tools with the `__handoff_destination` metadata key), you must provide one for **every** sub-agent — the library will raise an error if any agent is missing a corresponding handoff tool.
+</ParamField>
+
+<ParamField path="prompt" type="Prompt | None">
+  Optional system prompt for the supervisor. Accepts:
+
+  - `str` — converted to a `SystemMessage` prepended to `state["messages"]`
+  - `SystemMessage` — prepended to `state["messages"]`
+  - `Callable` — receives the full graph state; its return value is passed to the LLM
+  - `Runnable` — receives the full graph state; its return value is passed to the LLM
+</ParamField>
+
+<ParamField path="response_format" type="StructuredResponseSchema | tuple[str, StructuredResponseSchema] | None">
+  Optional schema for structured supervisor output. When provided, the final response is formatted to match the schema and stored in `state["structured_response"]`.
+
+  Accepts an OpenAI function/tool schema, JSON Schema, `TypedDict`, Pydantic model, or a `(prompt, schema)` tuple.
+
+  <Warning>
+    Requires the model to support `.with_structured_output` and a `structured_response` key in your state schema. Use the prebuilt `AgentStateWithStructuredResponse` or provide your own `state_schema`.
+  </Warning>
+</ParamField>
+
+<ParamField path="pre_model_hook" type="RunnableLike | None">
+  An optional node inserted **before** the LLM call inside the supervisor agent. Useful for trimming or summarizing long message histories.
+
+  Must be a callable or runnable that takes the current graph state and returns a dict with at least one of:
+
+  ```python
+  {
+      # Updates messages in state (use RemoveMessage to overwrite)
+      "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), ...],
+      # Passed directly to the LLM without updating state
+      "llm_input_messages": [...],
+      # Any other state keys to propagate
+      ...
+  }
+  ```
+
+  <Warning>
+    If you return `messages`, overwrite the key explicitly to avoid appending:
+
+    ```python
+    {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *new_messages]}
+    ```
+  </Warning>
+</ParamField>
+
+<ParamField path="post_model_hook" type="RunnableLike | None">
+  An optional node inserted **after** the LLM call inside the supervisor agent. Useful for human-in-the-loop flows, guardrails, validation, or other post-processing.
+
+  Must be a callable or runnable that takes the current graph state and returns a state update dict.
+</ParamField>
+
+<ParamField path="parallel_tool_calls" type="bool">
+  Whether to allow the supervisor LLM to call multiple tools (i.e., hand off to multiple agents) in a single turn. Defaults to `False`.
+
+  <Note>
+    Currently supported only by OpenAI and Anthropic models. For other providers, control parallel tool calling via the system prompt.
+  </Note>
+</ParamField>
+
+<ParamField path="state_schema" type="StateSchemaType | None">
+  Custom state schema for the supervisor graph. When omitted, defaults to `AgentState` (or `AgentStateWithStructuredResponse` when `response_format` is set).
+</ParamField>
+
+<ParamField path="context_schema" type="Type[Any] | None">
+  Schema for the context object passed to the workflow. Useful for injecting read-only configuration that is not part of the message history.
+</ParamField>
+
+<ParamField path="output_mode" type="OutputMode">
+  Controls how each sub-agent's output is added to the supervisor's message history. Defaults to `"last_message"`.
+
+  - `"last_message"` — adds only the last message (or the last two if the last message is a `ToolMessage`)
+  - `"full_history"` — adds the entire agent message history
+
+  See [OutputMode](/api-reference/output-mode) for details.
+</ParamField>
+
+<ParamField path="add_handoff_messages" type="bool">
+  Whether to add an `(AIMessage, ToolMessage)` pair to the message history when a handoff occurs. Defaults to `True`.
+</ParamField>
+
+<ParamField path="handoff_tool_prefix" type="str | None">
+  Optional prefix for auto-generated handoff tool names.
+
+  - When provided, tools are named `<prefix><agent_name>` (e.g., `delegate_to_math_expert`).
+  - When omitted, tools use the default `transfer_to_<agent_name>` naming.
+</ParamField>
+
+<ParamField path="add_handoff_back_messages" type="bool | None">
+  Whether to add an `(AIMessage, ToolMessage)` pair when control returns to the supervisor after a sub-agent finishes.
+
+  Defaults to `None`, which inherits the value of `add_handoff_messages`.
+</ParamField>
+
+<ParamField path="supervisor_name" type="str">
+  Name of the supervisor node in the graph. Defaults to `"supervisor"`.
+</ParamField>
+
+<ParamField path="include_agent_name" type="AgentNameMode | None">
+  Controls how sub-agent names are exposed to the supervisor LLM.
+
+  - `None` (default) — relies on the LLM provider's native `name` attribute support (currently only OpenAI).
+  - `"inline"` — wraps AI message content with XML tags: `<name>agent_name</name><content>...</content>`.
+
+  See [AgentNameMode](/api-reference/agent-name-mode) for details.
+</ParamField>
+
+## Returns
+
+<ResponseField name="StateGraph" type="StateGraph">
+  An uncompiled LangGraph `StateGraph`. Call `.compile()` before invoking or streaming.
+
+  ```python
+  app = workflow.compile()
+  result = app.invoke({"messages": [{"role": "user", "content": "..."}]})
+  ```
+</ResponseField>
